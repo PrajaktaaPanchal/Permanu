@@ -1,11 +1,11 @@
 import uvicorn, os, json, uuid
-from fastapi import FastAPI,UploadFile, File,Form, HTTPException
+from fastapi import FastAPI,UploadFile, File,Form
 from typing import Optional
 from connector import get_connection
 from fastapi.middleware.cors import CORSMiddleware
-import send_email,threading, datetime,schedule,time, smtplib, dns.resolver
-from contextlib import asynccontextmanager
+import send_email,time
 from apscheduler.schedulers.background import BackgroundScheduler
+from datetime import datetime, timedelta
 
 app = FastAPI()
 
@@ -22,22 +22,21 @@ app.add_middleware(
     allow_headers=["*"],)
 
 # *******************************************************************************************
-from datetime import datetime, timedelta
+
 def check_delay():
-    time.sleep(60)
+    time.sleep(5)
     connection=get_connection()
     cursor=connection.cursor()
     try:   
-        projects="""select Project_ID,Project_Name, Project_Owner_Email,Project_Owner_Name, Project_Date, Project_Status from projects """
+        projects="""select Project_ID, Project_Name, Project_Owner_Email, Project_Owner_Name, Project_Date, Project_Status from projects """
         cursor.execute(projects)
         ids=cursor.fetchall()
 
         for id in ids:
-            if id["Project_Date"] and id["Project_Status"] != 'Closed':
+            if (id["Project_Date"]) and (id["Project_Status"] != 'Closed'):
                 expected_date = datetime.strptime(id["Project_Date"], "%Y-%m-%d")
                 current_date = datetime.now()
                 delay = (current_date - expected_date).days 
-                print(delay)
                 if delay == 1:
                     status=f"""update projects set project_status='Delayed' where project_id='{id['Project_ID']}'"""
                     cursor.execute(status)
@@ -96,7 +95,7 @@ def check_due():
         ids=cursor.fetchall()
 
         for id in ids:
-            if id["Project_Date"] and id["Project_Status"] != 'Closed':
+            if (id["Project_Date"]) and (id["Project_Status"] != 'Closed'):
                 expected_date = datetime.strptime(id["Project_Date"], "%Y-%m-%d")
                 current_date = datetime.now()
 
@@ -115,8 +114,37 @@ def check_due():
         return {"message":"connection error"}
 # *******************************************************************************************
 scheduler = BackgroundScheduler()
-scheduler.add_job(check_delay, "cron", hour=23, minute=59)
+scheduler.add_job(check_delay, "cron", hour=23, minute=59, second=59)
 scheduler.start()
+
+# *******************************************************************************************
+def project_staus(Project_ID):
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        sql="""SELECT Status from project_milestones where Project_ID=%s"""
+        cursor.execute(sql,(Project_ID,))
+        results=cursor.fetchall()
+        print(results)
+        statuses = [row["Status"] for row in results]
+
+        project_info=f"""select project_name, project_owner_name, last_edited_date from projects where project_id='{Project_ID}'"""
+        cursor.execute(project_info)
+        info=cursor.fetchall()
+        if statuses and all(status == "Closed" for status in statuses):
+            sql = "UPDATE projects SET Project_Status = 'Closed' WHERE Project_ID = %s"
+            cursor.execute(sql, (Project_ID,))
+            conn.commit()
+            send_email.send_project_completed_email(info[0]["project_owner_name"], info[0]["project_name"], info[0]["last_edited_date"], project_url=None)
+            return {"message": "Project status updated to Closed"}
+        else:
+            sql = "UPDATE projects SET Project_Status = 'In Progress' WHERE Project_ID = %s"
+            cursor.execute(sql, (Project_ID,))
+            conn.commit()
+            return {"message": "Not all milestones are closed, project status unchanged"}
+    finally:
+        cursor.close()
+        conn.close()
 # *******************************************************************************************
 
 @app.post("/project_creation")
@@ -126,9 +154,6 @@ async def project_creation(
     Documents_BOM: Optional[UploadFile] = File(None)):
 
     project_dict = json.loads(project_data)
-    print("project_dict",project_dict)
-    print("Documents Received:", Documents_PO_Copy, Documents_BOM)
-    print("milestone",project_dict["Milestone"])
     files=[]
     connection = get_connection()
     cursor = connection.cursor()
@@ -147,14 +172,12 @@ async def project_creation(
     if Documents_BOM:
         document = f"documents/{project_id}/Documents_BOM/"
         os.makedirs(document, exist_ok=True)
-        print("Document Path:", document)
         bom_path = os.path.join(document, Documents_BOM.filename)
                 
         with open(bom_path, "wb") as f:
             f.write(await Documents_BOM.read()) 
         project_dict["Documents_BOM"] = bom_path
         files.append(project_dict["Documents_BOM"])
-    print("paths",po_copy_path,bom_path)
     
     current_date=datetime.now().strftime('%d-%m-%Y %H:%M:%S')
     query = """
@@ -205,8 +228,6 @@ async def project_creation(
         return {"message": "Project, milestones, and documents inserted successfully!"}
 
 # *******************************************************************************************
-
-# ********************************************************************************
 @app.get("/all_team")
 async def get_team():
     conn = get_connection()
@@ -331,9 +352,6 @@ def delete_member(member_id:int):
         cursor.close()
         connection.close()
         return {"message":"Team member not removed"}
-    
-# ********************************************************************************
-# send_project_completed_email( user_name, project_name, completed_date, project_url)
 
 # ********************************************************************************
 @app.put("/edit_member/{Owner_ID}")
@@ -360,6 +378,61 @@ async def edit_member(Owner_ID:int,login_details:str=Form(...) ):
         cursor.close()
         connection.close()
         return {"message":"Login_team details not edited"}
+    
+# ********************************************************************************
+@app.post("/update_milestone_status/{Status}/{MilestoneID}/{Project_ID}")
+def update_milestones_status(Status: str, MilestoneID: int, Project_ID: str):
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        if Status == "Closed":
+            update_query = """
+                UPDATE project_milestones 
+                SET Status = %s
+                WHERE MilestonesID = %s 
+                AND Project_ID = %s
+            """
+            cursor.execute(update_query, (Status, MilestoneID, Project_ID))
+            conn.commit()
+            update_query2 = """
+                UPDATE project_milestones 
+                SET milestone_comp_date = %s
+                WHERE MilestonesID = %s 
+                AND Project_ID = %s
+            """
+            cursor.execute(update_query2, (datetime.today().strftime('%Y-%m-%d'), MilestoneID, Project_ID))
+            conn.commit()
+            update_query3 = """
+                UPDATE projects 
+                SET Last_Edited_Date = %s
+                WHERE Project_ID = %s
+            """
+            cursor.execute(update_query3, (datetime.today().strftime('%Y-%m-%d'),Project_ID))
+            conn.commit()
+            project_staus(Project_ID)
+        else:
+            update_query = """
+                UPDATE project_milestones 
+                SET Status = %s, milestone_comp_date = NULL
+                WHERE MilestonesID = %s 
+                AND Project_ID = %s
+            """
+            cursor.execute(update_query, (Status, MilestoneID, Project_ID))
+            conn.commit()
+            update_query1 = """
+                UPDATE projects 
+                SET Last_Edited_Date = %s
+                WHERE Project_ID = %s
+            """
+            cursor.execute(update_query1, (datetime.today().strftime('%Y-%m-%d'),Project_ID))
+            conn.commit()
+            project_staus(Project_ID)
+        conn.close()
+        return {"message": "Milestone status updated successfully"}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 if __name__=="__main__":
   
     uvicorn.run("main:app",host="0.0.0.0",port=8020)

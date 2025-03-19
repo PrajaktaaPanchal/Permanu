@@ -524,6 +524,7 @@ def due_reminder_user(user_email, user_name, project_name, due_date, project_url
         return status
     except Exception as e:
         return status
+# *****************************************************************************************
 
 def send_project_completed_email( user_name, project_name, completed_date, project_url):
     subject = f"🎉 Project Completed: {project_name}"
