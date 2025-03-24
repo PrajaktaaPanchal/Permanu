@@ -1,9 +1,9 @@
 import uvicorn, os, json, uuid
-from fastapi import FastAPI,UploadFile, File,Form
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from typing import Optional
 from connector import get_connection
 from fastapi.middleware.cors import CORSMiddleware
-import send_email,time
+import send_email, time
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 
@@ -22,7 +22,6 @@ app.add_middleware(
     allow_headers=["*"],)
 
 # *******************************************************************************************
-
 def check_delay():
     time.sleep(5)
     connection=get_connection()
@@ -74,11 +73,16 @@ def check_delay():
                     print(f"Delayed by {delay} days.")
                     send_email.project_delay_user(user_email=id["Project_Owner_Email"], user_name=id["Project_Owner_Name"], project_name=id["Project_Name"], delayed_days=delay, reason=None, project_url=None)
                     send_email.project_delay_admin(project_name=id["Project_Name"], user_email=id["Project_Owner_Email"], due_date=id["Project_Date"], timestamp='None', project_url='url',delay_days=delay, reason=None)
-                else:
-                    print("The order is on time or ahead of schedule.")
+                elif delay > 0:
+                    status=f"""update projects set project_status='Delayed' where project_id='{id['Project_ID']}'"""
+                    cursor.execute(status)
+                    connection.commit()
+                    cursor.close()
+                    connection.close
             else:
                 pass
         check_due()
+        milestone_delay()
     except:
         cursor.close()
         connection.close()
@@ -112,6 +116,33 @@ def check_due():
         cursor.close()
         connection.close()
         return {"message":"connection error"}
+# *******************************************************************************************
+
+def milestone_delay():
+    connection=get_connection()
+    cursor=connection.cursor()
+    try:
+        miles="""select MilestonesID, Milestones_Due_Date, Status from project_milestones """
+        cursor.execute(miles)
+        ids=cursor.fetchall()
+        for id in ids:
+            if (id["Milestones_Due_Date"]) and (id["Status"] != 'Closed'):
+                expected_date = datetime.strptime(id["Milestones_Due_Date"], "%Y-%m-%d")
+                current_date = datetime.now()
+                delay = (current_date - expected_date).days 
+                print(delay)
+                if delay > 0:
+                    status=f"""update project_milestones set status='Delayed' where MilestonesID='{id['MilestonesID']}'"""
+                    cursor.execute(status)
+                    connection.commit()
+        cursor.close()
+        connection.close()
+    except:
+        cursor.close()
+        connection.close()
+        return {"message":"connection error"}
+                
+
 # *******************************************************************************************
 scheduler = BackgroundScheduler()
 scheduler.add_job(check_delay, "cron", hour=23, minute=59, second=59)
@@ -251,13 +282,11 @@ async def get_team():
                 elif i["Category"] == "client":
                     client_data.append(member)
                 else:
-                    account_manager_data.append(member)
-
+                    account_manager_data.append(member) 
             return {
                 "admin": admin_data,
                 "client": client_data,
-                "account_manager": account_manager_data
-            }
+                "account_manager": account_manager_data}
     finally:
         conn.close()
 # ********************************************************************************
@@ -322,7 +351,6 @@ def add_member(name:str, email:str, category:str):
                 return {"message":"Please check email id"}
         except:
             pass
-        # return {"message":"Team member added successfully"}    
     except:
         cursor.close()
         connection.close()
@@ -358,7 +386,6 @@ def delete_member(member_id:int):
 async def edit_member(Owner_ID:int,login_details:str=Form(...) ):
     connection=get_connection()
     cursor=connection.cursor()
-    print(login_details)
     try:
         login_data = json.loads(login_details)
         sql = """
@@ -410,7 +437,7 @@ def update_milestones_status(Status: str, MilestoneID: int, Project_ID: str):
             """
             cursor.execute(update_query3, (datetime.today().strftime('%Y-%m-%d'),Project_ID))
             conn.commit()
-            project_staus(Project_ID)
+            # project_staus(Project_ID)
         else:
             update_query = """
                 UPDATE project_milestones 
@@ -433,6 +460,81 @@ def update_milestones_status(Status: str, MilestoneID: int, Project_ID: str):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+# ********************************************************************************
+@app.get("/bubbles")
+def bubbles():
+    connection=get_connection()
+    cursor=connection.cursor()
+    try:
+        owner="select * from login_team where category='client'"
+        cursor.execute(owner)
+        data=cursor.fetchall()
+        main=[]
+        for i in data:
+            project=f"select count(*) from projects where project_owner_id={i['Owner_ID']}"
+            cursor.execute(project)
+            count=cursor.fetchall()
+            main.append({'Owner_Name': i['Owner_Name'], 'Email_ID': i['Email_ID'], 'Count': count[0]['count(*)']})        
+        return main
+    except:
+        cursor.close()
+        connection.close()
+        return {"message":"connection error"}
+    
+# ********************************************************************************
+@app.get("/graph")
+def graph():
+    connection=get_connection()
+    cursor=connection.cursor()
+    try:
+        owner="select * from login_team where category='client'"
+        cursor.execute(owner)
+        data=cursor.fetchall()
+        main=[]
+        for i in data:
+            inpro=f"select count(*) from project_milestones where Owner_ID={i['Owner_ID']} and status='In progress' or status='Open'"
+            cursor.execute(inpro)
+            inprogress=cursor.fetchall()
+            close=f"select count(*) from project_milestones where Owner_ID={i['Owner_ID']} and status='Closed'"
+            cursor.execute(close)
+            closed=cursor.fetchall()
+            delay=f"select count(*) from project_milestones where Owner_ID={i['Owner_ID']} and status='Delayed'"
+            cursor.execute(delay)
+            delayed=cursor.fetchall()
+            main.append({'Owner_Name':i['Owner_Name'],'Email_ID': i['Email_ID'],'In progress':inprogress[0]['count(*)'],'Completed':closed[0]['count(*)'],'Delayed':delayed[0]['count(*)']})
+        return main
+    except:
+            cursor.close()
+            connection.close()
+            return {"message":"connection error"}
+        
+# ********************************************************************************       
+@app.get("/calender")
+def calender():
+    connection=get_connection()
+    cursor=connection.cursor()
+    try:
+        owner="select Owner_ID, Owner_Name from login_team where category='client'"
+        cursor.execute(owner)
+        owners=cursor.fetchall()
+        main=[]
+        for i in owners:
+            miles=f"select Milestone_Name, Milestones_Due_Date from project_milestones where Owner_ID={i['Owner_ID']}"
+            cursor.execute(miles)
+            data=cursor.fetchall()
+            for date in data:
+                today = datetime.today().strftime('%Y-%m') 
+                milestone_due_date = datetime.strptime(date['Milestones_Due_Date'], '%Y-%m-%d').date()
+                due = milestone_due_date.strftime('%Y-%m') == today 
+                if due == True:
+                    main.append({'Owner_Name':i['Owner_Name'],'Milestone_Name':date['Milestone_Name'],'Milestones_Due_Date':date['Milestones_Due_Date']})
+        return main
+    except :
+            cursor.close()
+            connection.close()
+            return {"message":"connection error"}
+    
 if __name__=="__main__":
   
     uvicorn.run("main:app",host="0.0.0.0",port=8020)
