@@ -173,6 +173,7 @@ def allocation(project_name, user_name, user_email, description, due_date, task_
             </body>
             </html>
             """
+
     try:
         message = MIMEMultipart()
         message['Subject'] = subject
