@@ -2,7 +2,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from typing import Optional
 from connector import get_connection
 from fastapi.middleware.cors import CORSMiddleware
-import send_email, time,uvicorn, os, json, uuid, logging
+import send_email,uvicorn, os, json, uuid, logging, signal, sys,time
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 
@@ -24,41 +24,37 @@ app.add_middleware(
 
 logging.basicConfig(
         filename='main_log.log',
-        level=logging.INFO,
+        level=logging.DEBUG,
         format='%(asctime)s - %(levelname)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S')
 
 # *******************************************************************************************
+job_running = False
 def check_delay():
     time.sleep(5)
+    global job_running
+    if job_running:
+        print("Job is already running. Skipping execution.")
+        return  
+    job_running = True
     connection=get_connection()
     cursor=connection.cursor()
-    logging.info("Started to checking the delayed project")
-
     try:   
-        projects="""select Project_ID, Project_Name, Project_Owner_Email, Project_Owner_Name, Project_Date, Project_Status from projects """
+        projects="""select Project_ID, Project_Name, Project_Owner_Email, Project_Owner_Name, Delivery_Date, Project_Status from projects """
         cursor.execute(projects)
         ids=cursor.fetchall()
-
         for id in ids:
-            if (id["Project_Date"]) and (id["Project_Status"] != 'Closed'):
-                expected_date = datetime.strptime(id["Project_Date"], "%Y-%m-%d")
+            if (id["Delivery_Date"]) and (id["Project_Status"] != 'Closed'):
+                expected_date = datetime.strptime(id["Delivery_Date"], "%Y-%m-%d")
                 current_date = datetime.now()
                 delay = (current_date - expected_date).days
-                print("****delay",delay) 
-                logging.debug(f"Checking delay for project {id['Project_ID']} "
-                            f"(expected: {id['Project_Date']}, current: {current_date})")
-                
+            
                 if delay == 1:
-                    logging.warning(f"1-day delay detected for {id['Project_Name']}")
-                    status=f"""update projects set project_status='Delayed' where project_id='{id['Project_ID']}'"""
-                    cursor.execute(status)
-                    connection.commit()
-                
                     print("Delayed by 1 day.")
                     send_email.project_delay_user(user_email=id["Project_Owner_Email"], user_name=id["Project_Owner_Name"], project_name=id["Project_Name"], delayed_days=delay, reason=None, project_url=None)
-                    send_email.project_delay_admin(project_name=id["Project_Name"], user_email=id["Project_Owner_Email"], due_date=id["Project_Date"], timestamp='None', project_url='url',delay_days=delay, reason=None)
-                elif delay == 3:
+                    send_email.project_delay_admin(project_name=id["Project_Name"], user_email=id["Project_Owner_Email"], due_date=id["Delivery_Date"], timestamp='None', project_url='url',delay_days=delay, reason=None)
+
+                if delay == 3:
                     logging.warning(f"3-day delay detected for {id['Project_Name']}")
                     status=f"""update projects set project_status='Delayed' where project_id='{id['Project_ID']}'"""
                     cursor.execute(status)
@@ -66,9 +62,9 @@ def check_delay():
                     
                     print("Delayed by 3 days.")
                     send_email.project_delay_user(user_email=id["Project_Owner_Email"], user_name=id["Project_Owner_Name"], project_name=id["Project_Name"], delayed_days=delay, reason=None, project_url=None)
-                    send_email.project_delay_admin(project_name=id["Project_Name"], user_email=id["Project_Owner_Email"], due_date=id["Project_Date"], timestamp='None', project_url='url',delay_days=delay, reason=None)
+                    send_email.project_delay_admin(project_name=id["Project_Name"], user_email=id["Project_Owner_Email"], due_date=id["Delivery_Date"], timestamp='None', project_url='url',delay_days=delay, reason=None)
                     
-                elif delay == 7:
+                if delay == 7:
                     logging.warning(f"7-day delay detected for {id['Project_Name']}")
                     status=f"""update projects set project_status='Delayed' where project_id='{id['Project_ID']}'"""
                     cursor.execute(status)
@@ -76,8 +72,8 @@ def check_delay():
                     
                     print(f"Delayed by {delay} days.")
                     send_email.project_delay_user(user_email=id["Project_Owner_Email"], user_name=id["Project_Owner_Name"], project_name=id["Project_Name"], delayed_days=delay, reason=None, project_url=None)
-                    send_email.project_delay_admin(project_name=id["Project_Name"], user_email=id["Project_Owner_Email"], due_date=id["Project_Date"], timestamp='None', project_url='url',delay_days=delay, reason=None)
-                elif delay == 15:
+                    send_email.project_delay_admin(project_name=id["Project_Name"], user_email=id["Project_Owner_Email"], due_date=id["Delivery_Date"], timestamp='None', project_url='url',delay_days=delay, reason=None)
+                if delay == 15:
                     logging.warning(f"15-day delay detected for {id['Project_Name']}")
                     status=f"""update projects set project_status='Delayed' where project_id='{id['Project_ID']}'"""
                     cursor.execute(status)
@@ -85,16 +81,22 @@ def check_delay():
 
                     print(f"Delayed by {delay} days.")
                     send_email.project_delay_user(user_email=id["Project_Owner_Email"], user_name=id["Project_Owner_Name"], project_name=id["Project_Name"], delayed_days=delay, reason=None, project_url=None)
-                    send_email.project_delay_admin(project_name=id["Project_Name"], user_email=id["Project_Owner_Email"], due_date=id["Project_Date"], timestamp='None', project_url='url',delay_days=delay, reason=None)
+                    send_email.project_delay_admin(project_name=id["Project_Name"], user_email=id["Project_Owner_Email"], due_date=id["Delivery_Date"], timestamp='None', project_url='url',delay_days=delay, reason=None)
+                
                 elif delay > 0:
+                    print("delay is more than 15 days")
                     logging.warning(f"{delay}-day delay detected for {id['Project_Name']}")
                     status=f"""update projects set project_status='Delayed' where project_id='{id['Project_ID']}'"""
                     cursor.execute(status)
                     connection.commit()
-                    
+            else:
+                continue      
         logging.info("checking delay completed successfully")
+        job_running = False 
+
         check_due()
         milestone_delay()
+        filter_logs()
         return {"message": "Success"}
         
     except Exception as e:
@@ -112,29 +114,31 @@ def check_due():
     cursor=connection.cursor()
     logging.info("Started to checking due projects")
     try:   
-        projects="""select Project_Name, Project_Owner_Email,Project_Owner_Name, Project_Date, Project_Status from projects """
+        projects="""select Project_Name, Project_Owner_Email,Project_Owner_Name, Delivery_Date, Project_Status from projects """
         cursor.execute(projects)
         ids=cursor.fetchall()
 
         for id in ids:
-            if (id["Project_Date"]) and (id["Project_Status"] != 'Closed'):
-                expected_date = datetime.strptime(id["Project_Date"], "%Y-%m-%d")
+            if (id["Delivery_Date"]) and (id["Project_Status"] != 'Closed'):
+                expected_date = datetime.strptime(id["Delivery_Date"], "%Y-%m-%d")
                 current_date = datetime.now()
 
                 reminder_date = expected_date - timedelta(days=2)
                 
                 logging.debug(f"Processing project: {id['Project_Name']} "
-                            f"(Due: {id['Project_Date']}, Status: {id['Project_Status']})")
+                            f"(Due: {id['Delivery_Date']}, Status: {id['Project_Status']})")
                 
                 if current_date.date() == reminder_date.date() :
                     logging.info(f"Sending 2-day reminder for project: {id['Project_Name']}")
-                    send_email.due_reminder_user(user_email=id["Project_Owner_Email"], user_name=id["Project_Owner_Name"], project_name=id["Project_Name"], due_date=id["Project_Date"], project_url=None, days_remaining=2)
+                    send_email.due_reminder_user(user_email=id["Project_Owner_Email"], user_name=id["Project_Owner_Name"], project_name=id["Project_Name"], due_date=id["Delivery_Date"], project_url=None, days_remaining=2)
                     logging.debug(f"2-day reminder email sent to '{id["Project_Owner_Email"]}'")
         
                 if current_date.date() == expected_date.date():
                     logging.info(f"Sending due date reminder for project: {id['Project_Name']}")
-                    send_email.due_reminder_user(user_email=id["Project_Owner_Email"], user_name=id["Project_Owner_Name"], project_name=id["Project_Name"], due_date=id["Project_Date"], project_url=None, days_remaining=0)
+                    send_email.due_reminder_user(user_email=id["Project_Owner_Email"], user_name=id["Project_Owner_Name"], project_name=id["Project_Name"], due_date=id["Delivery_Date"], project_url=None, days_remaining=0)
                     logging.debug(f"Due date reminder email sent to '{id["Project_Owner_Email"]}'")
+            else:
+                logging.info("Project end date or project status mismatched")
         
         logging.info("Project due date check completed successfully")
         return {"message": "Success"}
@@ -164,7 +168,6 @@ def milestone_delay():
                 delay = (current_date - expected_date).days 
                 logging.debug(f"Processing milestone: {id['MilestonesID']} "
                             f"(Due: {id['Milestones_Due_Date']}, Status: {id['Status']})")
-                print("Milestone delay",delay)
                 if delay > 0:
                     logging.warning(f"Milestone {id['MilestonesID']} is delayed by {delay} days")
                     status=f"""update project_milestones set status='Delayed' where MilestonesID='{id['MilestonesID']}'"""
@@ -180,12 +183,7 @@ def milestone_delay():
         return {"message": "connection error"}
     finally:
         cursor.close()
-        connection.close()         
-
-# *******************************************************************************************
-scheduler = BackgroundScheduler()
-scheduler.add_job(check_delay, "cron", hour=23, minute=59, second=59)
-scheduler.start()
+        connection.close()        
 
 # *******************************************************************************************
 def project_staus(Project_ID):
@@ -226,7 +224,6 @@ def project_staus(Project_ID):
     finally:
         cursor.close()
         conn.close()
-        logging.info("Database connection closed")
 # *******************************************************************************************
 
 @app.post("/project_creation")
@@ -241,7 +238,6 @@ async def project_creation(
     connection = get_connection()
     cursor = connection.cursor()
     try:
-
         project_id=str(uuid.uuid4().hex)[:16]
         if Documents_PO_Copy:
             document_path = f"documents/{project_id}/Documents_PO_Copy/"
@@ -267,19 +263,19 @@ async def project_creation(
         
         current_date=datetime.now().strftime('%d-%m-%Y %H:%M:%S')
         query = """
-        INSERT INTO projects (Project_Id,Project_Name, Project_Location, Project_Contract_Number, Project_Date, Project_Total_Value, 
+        INSERT INTO projects (Project_Id,Project_Name, Project_Location, Project_Contract_Number, Delivery_Date, Project_Total_Value, 
                             Project_Capex, Project_Opex, Project_Owner_ID, Project_Owner_Name, Project_Owner_Email, 
                             Project_Scope, 
                             Customer_Contact_Person, Customer_Phone_Number, Customer_Email_Address, 
                             Customer_Fax_Number, Customer_Address, Documents_Del_Challan, Documents_Train_Cert,
-                            Documents_PO_Copy,Documents_BOM,Project_Account_Manager,Account_Manager_ID,Account_Manager_Email,Created_date,Project_Status) 
+                            Documents_PO_Copy,Documents_BOM,Project_Account_Manager,Account_Manager_ID,Account_Manager_Email, Project_Date, Project_Status) 
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"""
         cursor.execute(query, 
         (project_id,
         project_dict.get("Project_Name", None), 
         project_dict.get("Project_Location", None), 
         project_dict.get("Project_Contract_Number", None),
-        project_dict.get("Project_Date", None), 
+        project_dict.get("Delivery_Date", None), 
         project_dict.get("Project_Total_Value", None), 
         project_dict.get("Project_Capex", None),
         project_dict.get("Project_Opex", None), 
@@ -299,23 +295,21 @@ async def project_creation(
         project_dict.get("Project_Account_Manager", None),
         project_dict.get("Account_Manager_ID", None),
         project_dict.get("Account_Manager_Email", None),
-        current_date, 
-        'Open'
-    )
-    )
+        current_date,
+        'Open'))
         connection.commit()
         logging.info(f"Created project with ID: {project_id}")
-    
+
         if "Milestone" in project_dict and isinstance(project_dict["Milestone"], list):
             milestone_query = """
             INSERT INTO project_milestones 
             (Project_ID, Owner_ID, Milestone_Name, Milestones_Due_Date, Milestones_T_Days, 
             Pay_Milestone, Percentage_Payment, Amount, status) 
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """        
-            milestone_values = []
+            """
+            
             for milestone in project_dict["Milestone"]:
-                milestone_values.append((
+                milestone_values = (
                     project_id,
                     project_dict.get("Project_Owner_ID"), 
                     milestone.get("Milestone_Name"),
@@ -324,27 +318,73 @@ async def project_creation(
                     milestone.get("Pay_Milestone"),
                     milestone.get("Percentage_Payment"),
                     milestone.get("Amount"),
-                    'Open'))
-                    
-            if milestone_values: 
-                cursor.executemany(milestone_query, milestone_values)
-                connection.commit()        
-                logging.info(f"Created {len(milestone_values)} milestones")
-            cursor.close()
-            connection.close()
-            logging.info("Sent project allocation email")
-            
-            send_email.allocation(project_dict["Project_Name"], project_dict["Project_Owner_Name"], project_dict["Project_Owner_Email"], project_dict["Project_Scope"], project_dict["Project_Date"], "http://192.168.60.7:3000/", files)
-            return {"message": "Project created successfully!"}
-    
+                    'Open'
+                )
+
+                cursor.execute(milestone_query, milestone_values)
+                connection.commit()
+                milestone_id = cursor.lastrowid  
+
+                if "Submilestones" in milestone and isinstance(milestone["Submilestones"], list):
+                    submilestone_query = """
+                    INSERT INTO sub_milestones 
+                    (Project_ID, Owner_ID, MilestonesID, Sub_Task_Name, Sub_Task_Desc, Due_Date, 
+                        Sub_Creation_Date, Sub_Target_Date) 
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"""
+                    submilestone_values = [
+                        (
+                            project_id, 
+                            project_dict.get("Project_Owner_ID"), 
+                            milestone_id,  
+                            sub.get("Sub_Task_Name", ""),   
+                            sub.get("Sub_Task_Desc", None), 
+                            sub.get("Due_Date", None), 
+                            current_date, 
+                            sub.get("Sub_Target_Date", None) 
+                        )
+                        for sub in milestone["Submilestones"] if sub.get("Sub_Task_Name") 
+                    ]
+                    if submilestone_values:
+                        cursor.executemany(submilestone_query, submilestone_values)
+                        connection.commit()
+                        logging.info(f"Created {len(submilestone_values)} submilestones for Milestone ID: {milestone_id}")
+                    else:
+                        print("not")
+        logging.info("Sent project allocation email")
+        return {"message": "Project created successfully"}
+        
     except Exception as e:
         logging.error(f"Error during project creation: {str(e)}")
         return {"message": "Error creating project"}
+
+# *******************************************************************************************
+def filter_logs(max_age_days=2):
+    cutoff_date = datetime.now() - timedelta(days=max_age_days)
+    log_path='main_log.log'
+    recent_entries = []
+    try:
+        with open(log_path, 'r', encoding='utf-8') as file:
+            for line in file:
+                try:
+                    timestamp_str = line[:19].strip()
+                    entry_date = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
+                    if entry_date >= cutoff_date:
+                        recent_entries.append({
+                            'date': entry_date,
+                            'content': line.strip()[19:].strip()
+                        })
+                except (ValueError, IndexError):
+                    continue
     
-    # finally:
-    #     cursor.close()
-    #     connection.close()
-    #     logging.info("Database connection closed")
+        with open(log_path, 'w', encoding='utf-8') as file:
+            for entry in recent_entries:
+                formatted_line = f"{entry['date'].strftime('%Y-%m-%d %H:%M:%S')} {entry['content']}\n"
+                file.write(formatted_line)
+                
+    except FileNotFoundError:
+        print(f"Error: Log file not found - {log_path}")
+    except Exception as e:
+        print(f"Error processing log file: {str(e)}")
 
 # *******************************************************************************************
 @app.get("/all_team")
@@ -368,13 +408,10 @@ async def get_team():
                 }
                 if i["Category"] == "admin":
                     admin_data.append(member)
-                    logging.debug(f"Added to admin team: {member['Owner_Name']}")
                 elif i["Category"] == "client":
-                    client_data.append(member)
-                    logging.debug(f"Added to client team: {member['Owner_Name']}")
+                    client_data.append(member)    
                 else:
-                    account_manager_data.append(member) 
-                    logging.debug(f"Added to client team: {member['Owner_Name']}")
+                    account_manager_data.append(member)       
             logging.info(f"Team distribution - Admins: {len(admin_data)}, Clients: {len(client_data)}, Account Managers: {len(account_manager_data)}")
             
             return {
@@ -388,7 +425,7 @@ async def get_team():
     
     finally:
         conn.close()
-        logging.info("Database connection closed")
+        
 # ********************************************************************************
         
 @app.put("/edit_project/{project_id}")
@@ -414,9 +451,7 @@ async def edit_project(project_id:str, project_details: str = Form (...)):
     finally:
         cursor.close()
         connection.close()
-        logging.info("Database connection closed")
         
-    
 # ********************************************************************************
 @app.put("/edit_customer_details/{project_id}")
 async def edit_customer_details(project_id:str, customer_details:str=Form(...) ):
@@ -441,8 +476,7 @@ async def edit_customer_details(project_id:str, customer_details:str=Form(...) )
     finally:
         cursor.close()
         connection.close()
-        logging.info("Database connection closed")
-    
+        
 # ********************************************************************************    
 @app.post("/add_member/{name}/{email}/{category}")
 def add_member(name:str, email:str, category:str):
@@ -472,15 +506,14 @@ def add_member(name:str, email:str, category:str):
     finally:
         cursor.close()
         connection.close()
-        logging.info("Database connection closed")
-    
+        
 # ********************************************************************************
 @app.delete("/delete_member/{member_id}")
 def delete_member(member_id:int):
     connection=get_connection()
     cursor=connection.cursor()
     try:    
-        project=f"select project_name from projects where project_owner_id={member_id}"
+        project=f"select project_name from projects where project_owner_id={member_id} or account_manager_id={member_id}"
         cursor.execute(project)
         num=cursor.fetchall()
         logging.debug(f"Found {len(num)} projects owned by member")
@@ -503,7 +536,6 @@ def delete_member(member_id:int):
         connection.close()
         logging.info("Database connection closed")
         
-
 # ********************************************************************************
 @app.put("/edit_member/{Owner_ID}")
 async def edit_member(Owner_ID:int,login_details:str=Form(...) ):
@@ -615,8 +647,8 @@ def bubbles():
             project=f"select count(*) from projects where project_owner_id={i['Owner_ID']}"
             cursor.execute(project)
             value=cursor.fetchall()
-            main.append({'Owner_Name': i['Owner_Name'], 'Email_ID': i['Email_ID'], 'Count': value[0]['count(*)']})
-        result=sorted(main,key=lambda x:x['Count']>0,reverse=True)
+            main.append({'Owner_Name': i['Owner_Name'], 'Email_ID': i['Email_ID'], 'Projects': value[0]['count(*)']})
+        result=sorted(main,key=lambda x:x['Projects']>0,reverse=True)
         logging.info("Successfully completed bubbles endpoint execution")
         return result
     except Exception as e:
@@ -626,11 +658,9 @@ def bubbles():
     finally:
         if 'cursor' in locals():
             cursor.close()
-            logging.debug("Cursor closed")
         if 'connection' in locals():
             connection.close()
-            logging.debug("Connection closed")
-    
+            
 # ********************************************************************************
 @app.get("/graph")
 def graph():
@@ -747,22 +777,20 @@ def Miles_delayed():
     finally:
         if 'conn' in locals():
             conn.close()
-            logging.debug("Connection closed")
-
+           
 # ********************************************************************************   
 @app.get("/target")
 def target():
     connection=get_connection()
     cursor=connection.cursor()
     try:
-        target="""select DATE_FORMAT(Project_Date, '%b-%y') AS Month, COUNT(Project_ID) AS Total,
+        target="""select DATE_FORMAT(Delivery_Date, '%b-%y') AS Month, COUNT(Project_ID) AS Total,
         SUM(CASE WHEN Project_Status = 'Closed' THEN 1 ELSE 0 END) AS Completed
         from projects WHERE Project_Status != 'Delayed' 
-        AND Project_Date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
-        GROUP BY YEAR(Project_Date),
-        MONTH(Project_Date), Month ORDER BY YEAR(Project_Date) DESC, MONTH(Project_Date) DESC"""
+        AND Delivery_Date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
+        GROUP BY YEAR(Delivery_Date),
+        MONTH(Delivery_Date), Month ORDER BY YEAR(Delivery_Date) DESC, MONTH(Delivery_Date) DESC"""
         
-        logging.debug(f"Executing query: {target}")
         cursor.execute(target)
         data=cursor.fetchall()
         
@@ -778,8 +806,68 @@ def target():
             cursor.close()
         if 'connection' in locals():
             connection.close()
-    
+           
+# ********************************************************************************  
+@app.get("/account_managers")
+def account_managers():
+    connection=get_connection()
+    cursor=connection.cursor()
+    try:
+        owner="select * from login_team where category='Account_Manager'"
+        cursor.execute(owner)
+        data=cursor.fetchall()
+        main=[]
+        for i in data:
+            total=f"select count(*) from projects where Account_Manager_ID={i['Owner_ID']} "
+            cursor.execute(total)
+            to=cursor.fetchall()
 
+            op=f"select count(*) from projects where Account_Manager_ID={i['Owner_ID']} and (project_status='Open' or project_status='In progress' or project_status='Delayed')"
+            cursor.execute(op)
+            incom=cursor.fetchall()
+
+            close=f"select count(*) from projects where Account_Manager_ID={i['Owner_ID']} and project_status='Closed'"
+            cursor.execute(close)
+            com=cursor.fetchall()
+        
+            main.append({'Owner_Name':i['Owner_Name'],'Email_ID': i['Email_ID'],'In progress':incom[0]['count(*)'],'Completed':com[0]['count(*)'],'Total':to[0]['count(*)']})
+        result = sorted(main, key=lambda x: ( x['In progress'] > 0 or x['Completed'] > 0 or x['Total'] > 0), reverse=True)
+        logging.info("Successfully completed graph endpoint execution")
+        return result
     
-if __name__=="__main__":
-    uvicorn.run("main:app",host="0.0.0.0",port=8020)
+    except Exception as e:
+        logging.exception(f"Error in graph endpoint: {str(e)}")
+        return {"message": "connection error"}, 500
+    
+    finally:
+        if 'cursor' in locals(): cursor.close()
+        if 'connection' in locals(): connection.close()
+
+# if __name__=="__main__":
+#     uvicorn.run("main:app",host="0.0.0.0",port=8020)
+
+scheduler = BackgroundScheduler(daemon=True)
+
+job_id = 'check_delay_job'
+
+if not any(job.id == job_id for job in scheduler.get_jobs()):
+    # Schedule the job to run once at a specific time (14:33:05)
+    scheduler.add_job(check_delay, 'cron', hour=23, minute=59, second=59, id=job_id, max_instances=1)
+    print("Job scheduled successfully.")
+else:
+    print("Job is already scheduled.")
+
+scheduler.start()
+
+def shutdown_scheduler():
+    scheduler.shutdown()
+    sys.exit(0) 
+
+signal.signal(signal.SIGINT, shutdown_scheduler)
+signal.signal(signal.SIGTERM, shutdown_scheduler)
+
+try:
+    uvicorn.run(app, host="0.0.0.0", port=8020)
+
+except (KeyboardInterrupt, SystemExit):
+    scheduler.shutdown() 
